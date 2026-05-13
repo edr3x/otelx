@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"runtime"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -272,34 +271,4 @@ func NewMeterProvider(ctx context.Context, service string) func() {
 	}
 
 	return shutdown
-}
-
-// StartSpan creates a new span using the globally registered tracer.
-//
-// Features:
-//   - Automatically generates the span name using caller function name + line
-//   - Gracefully falls back to a No-Op tracer if telemetry is disabled
-//   - Accepts optional trace.SpanStartOption arguments
-//
-// Example:
-//
-//	ctx, span := otelx.StartSpan(ctx)
-//	defer span.End()
-//
-// This helper is designed for internal code paths where manually naming each
-// span would be verbose. For API-level or logical spans, prefer explicit names:
-//
-//	ctx, span := tracer.Start(ctx, "database.query")
-func StartSpan(ctx context.Context, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
-	if tracer == nil || grpcConnection == nil {
-		// Use the noop tracer provider
-		noopTracer := noop.NewTracerProvider().Tracer("noop")
-		return noopTracer.Start(ctx, "noop", opts...)
-	}
-
-	// Extract caller info for auto-span naming.
-	pc, _, line, _ := runtime.Caller(1)
-	fn := runtime.FuncForPC(pc)
-
-	return tracer.Start(ctx, fmt.Sprintf("%s:%d", fn.Name(), line), opts...)
 }

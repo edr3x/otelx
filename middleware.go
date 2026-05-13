@@ -90,21 +90,25 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 		duration := time.Since(start).Seconds()
 
 		// Record metrics correctly using metric.WithAttributes
-		metrics.RequestCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("method", r.Method),
-				attribute.String("path", r.URL.Path),
-				attribute.Int("status_code", rw.Status()),
-			),
-		)
+		if metrics.RequestCounter != nil {
+			metrics.RequestCounter.Add(ctx, 1,
+				metric.WithAttributes(
+					attribute.String("method", r.Method),
+					attribute.String("path", r.URL.Path),
+					attribute.Int("status_code", rw.Status()),
+				),
+			)
+		}
 
-		metrics.RequestHistogram.Record(ctx, duration,
-			metric.WithAttributes(
-				attribute.String("method", r.Method),
-				attribute.String("path", r.URL.Path),
-				attribute.Int("status_code", rw.Status()),
-			),
-		)
+		if metrics.RequestHistogram != nil {
+			metrics.RequestHistogram.Record(ctx, duration,
+				metric.WithAttributes(
+					attribute.String("method", r.Method),
+					attribute.String("path", r.URL.Path),
+					attribute.Int("status_code", rw.Status()),
+				),
+			)
+		}
 	}
 
 	return http.HandlerFunc(fn)
