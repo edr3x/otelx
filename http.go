@@ -10,66 +10,76 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
-// HTTPClient returns a new *http.Client configured with OpenTelemetry tracing support.
+// defaultClient is the shared HTTP client used by DoRequest.
 //
-// It performs two key tasks:
-//  1. Injects the current trace context into the given HTTP request headers,
-//     allowing distributed tracing across service boundaries.
-//  2. Wraps the default HTTP transport with otelhttp.NewTransport to automatically
-//     record metrics and spans for outgoing HTTP requests.
+// It is declared at package scope (rather than constructed per call) so that
+// the underlying transport's connection pool is reused across requests.
+// Creating a new *http.Client on every call would discard idle connections
+// and force a fresh TCP/TLS handshake each time, which is wasteful under
+// any non-trivial load.
 //
-// The client uses a 20-second timeout by default.
+// Configuration:
 //
-// Example:
+//   - Timeout: 20 seconds. This is an end-to-end deadline covering connection,
+//     any redirects, and reading the response body. Callers that need a
+//     different deadline should use context.WithTimeout on the request's
+//     context rather than mutating this client.
+//   - Transport: http.DefaultTransport wrapped with otelhttp.NewTransport,
+//     which records a span and standard HTTP metrics for every request.
 //
-//	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.example.com", body)
-//	client := HTTPClient(ctx, req)
-//	resp, err := client.Do(req)
-//	if err != nil {
-//		log.Println("Request failed:", err)
-//	}
-//	defer resp.Body.Close()
-//
-// Note: You must call this function *before* sending the request to ensure
-// trace propagation headers are properly included.
-func HTTPClient(ctx context.Context, req *http.Request) *http.Client {
-	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
-	return &http.Client{
-		Timeout:   20 * time.Second,
-		Transport: otelhttp.NewTransport(http.DefaultTransport),
-	}
+// *http.Client is safe for concurrent use by multiple goroutines, so this
+// single instance can serve the entire process.
+var defaultClient = &http.Client{
+	Timeout:   20 * time.Second,
+	Transport: otelhttp.NewTransport(http.DefaultTransport),
 }
 
-// DoRequest executes an HTTP request with OpenTelemetry tracing and context propagation.
+// DoRequest executes an HTTP request with OpenTelemetry tracing and
+// context propagation.
 //
-// It is a convenience wrapper that automatically:
-//  1. Injects the trace context from the provided context into the request headers.
-//  2. Creates an instrumented *http.Client* using HTTPClient for distributed tracing.
-//  3. Executes the HTTP request and returns the response.
+// It performs two steps before delegating to the shared client:
 //
-// This function is part of a flexible utility layer — developers can either:
-//   - Use DoRequest() for simple, one-off HTTP calls.
-//   - Use HTTPClient() directly when more control is needed (e.g., reusing the same client,
-//     customizing timeouts, or applying retries).
+//  1. Injects the trace context carried by ctx into req.Header using the
+//     globally configured TextMapPropagator. This lets downstream services
+//     stitch their spans onto the current trace.
+//  2. Sends the request through the package's shared, otelhttp-instrumented
+//     client, which records a client span and standard HTTP metrics.
+//
+// The provided ctx should normally be the same context attached to req via
+// http.NewRequestWithContext. Cancelling ctx (e.g. via context.WithTimeout
+// or context.WithCancel) cancels the in-flight request.
+//
+// DoRequest is intended for the common case of a single, one-off HTTP call.
+// If you need finer control - custom timeouts per call, retries, a different
+// transport, or a long-lived client tied to a specific dependency -
+// construct your own *http.Client wrapped with otelhttp.NewTransport and
+// inject the propagator yourself.
 //
 // Example:
 //
-//	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.example.com", nil)
+//	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.example.com", nil)
+//	if err != nil {
+//	    return err
+//	}
 //	resp, err := otelx.DoRequest(ctx, req)
 //	if err != nil {
-//		log.Println("Request failed:", err)
-//		return
+//	    log.Println("request failed:", err)
+//	    return err
 //	}
 //	defer resp.Body.Close()
 //
 //	if resp.StatusCode != http.StatusOK {
-//		log.Printf("Unexpected status: %d", resp.StatusCode)
+//	    log.Printf("unexpected status: %d", resp.StatusCode)
 //	}
 //
-// Return values:
-//   - *http.Response: the HTTP response returned by the server
-//   - error: if the request fails or the context is canceled
+// Returns:
+//   - *http.Response: the response from the server. The caller is
+//     responsible for closing resp.Body.
+//   - error: a non-nil error if the request could not be sent, the context
+//     was cancelled, or the configured timeout was exceeded. Note that
+//     non-2xx HTTP status codes are *not* returned as errors; callers
+//     must inspect resp.StatusCode themselves.
 func DoRequest(ctx context.Context, req *http.Request) (*http.Response, error) {
-	client := HTTPClient(ctx, req)
-	return client.Do(req)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+	return defaultClient.Do(req)
 }
